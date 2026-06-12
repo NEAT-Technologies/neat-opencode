@@ -60,9 +60,14 @@ const RunSub: CommandModule<unknown, unknown> = {
       })
       .option("worker", {
         type: "string",
-        choices: ["stub", "opencode"],
+        choices: ["stub", "opencode", "multi-role-stub"],
         default: "stub",
-        describe: "Phase 2 worker. `stub`=deterministic test worker; `opencode`=real OpenCode session (stub pending SDK wiring).",
+        describe: "Worker. `stub`/`opencode` for Phase 2 single-contract; `multi-role-stub` for Phase 3 orchestration.",
+      })
+      .option("multi-agent", {
+        type: "boolean",
+        default: false,
+        describe: "Phase 3: orchestrate multiple agent roles (graph_context, root_cause, patch, test, reviewer, security_risk, migration).",
       })
       .option("workspace", {
         type: "string",
@@ -102,6 +107,7 @@ const RunSub: CommandModule<unknown, unknown> = {
         maxRetries: typeof a["max-retries"] === "number" ? (a["max-retries"] as number) : undefined,
         allowDirtyWorkspace: a["allow-dirty-workspace"] === true,
         allowNonGitWorkspace: a["allow-non-git-workspace"] === true,
+        multiAgent: a["multi-agent"] === true,
       })
       process.stdout.write(formatSummary(result) + "\n")
     } catch (err) {

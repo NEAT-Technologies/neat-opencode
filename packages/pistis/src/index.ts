@@ -30,13 +30,16 @@ import { NoopDispatcher, buildSafetyRules } from "./opencode/dispatcher"
 import { OpenCodeSessionDispatcher } from "./opencode/opencode-session-dispatcher"
 import { StubWorker } from "./opencode/stub-worker"
 import { OpenCodeWorker } from "./opencode/opencode-worker"
+import { MultiRoleStubWorker } from "./orchestration/role-worker"
+import { MultiAgentOrchestrator } from "./orchestration/orchestrator"
+import { buildOrchestrationPlan } from "./orchestration/plan"
 import type { Worker } from "./opencode/worker"
 import { RuleBasedContractReviewer } from "./contract/reviewer"
 import type { ContractReviewer } from "./contract/reviewer"
 import { ArtifactStore, resolveArtifactRoot, artifactWriter } from "./artifacts/store"
 import { renderFinalReport } from "./report/final-report"
 
-export type WorkerKind = "stub" | "opencode"
+export type WorkerKind = "stub" | "opencode" | "multi-role-stub"
 
 export interface RunPistisOptions {
   incidentPath: string
@@ -58,6 +61,8 @@ export interface RunPistisOptions {
   allowNonGitWorkspace?: boolean
   /** Phase 2: cap contract retries. Default 2 (so 3 attempts total). */
   maxRetries?: number
+  /** Phase 3: switch to multi-agent orchestration (multiple roles per incident). */
+  multiAgent?: boolean
   /** For tests. */
   fetchImpl?: typeof fetch
   workerImpl?: Worker
@@ -111,6 +116,7 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
         worker: opts.worker ?? "stub",
         workspace: opts.workspace,
         maxRetries: opts.maxRetries,
+        multiAgent: opts.multiAgent === true,
       },
     },
   })
@@ -169,17 +175,47 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
     if (!opts.workspace) {
       throw new Error("pistis: --apply requires --workspace pointing at a (clean) git repo")
     }
-    const worker = opts.workerImpl ?? pickWorker(opts.worker ?? "stub")
     const reviewer = opts.reviewerImpl ?? new RuleBasedContractReviewer()
-    const dispatcher = new OpenCodeSessionDispatcher({
-      worker,
-      reviewer,
-      workspaceCwd: opts.workspace,
-      allowDirtyWorkspace: opts.allowDirtyWorkspace,
-      allowNonGitWorkspace: opts.allowNonGitWorkspace,
-      writeArtifact: artifactWriter(store),
-    })
-    dispatch = await dispatcher.dispatch(dispatchInput)
+    if (opts.multiAgent === true) {
+      // Phase 3 path: multi-agent orchestrator.
+      const worker = opts.workerImpl ?? pickWorker(opts.worker ?? "multi-role-stub")
+      const orchPlan = buildOrchestrationPlan(classification)
+      const orchestrator = new MultiAgentOrchestrator({
+        worker,
+        reviewer,
+        workspaceCwd: opts.workspace,
+        allowDirtyWorkspace: opts.allowDirtyWorkspace,
+        allowNonGitWorkspace: opts.allowNonGitWorkspace,
+        writeArtifact: artifactWriter(store),
+        maxRetries: opts.maxRetries,
+      })
+      const orchSummary = await orchestrator.run({
+        incident,
+        graph,
+        plan,
+        classification,
+        riskGates,
+        testCommands: opts.testCommands ?? [],
+        orchestrationPlan: orchPlan,
+      })
+      dispatch = {
+        dispatched: orchSummary.finalVerdict === "accepted",
+        reason: `multi-agent: ${orchSummary.totalAttempts} attempt(s) across ${orchPlan.steps.length} role(s); final verdict=${orchSummary.finalVerdict}`,
+        dispatchedAt: new Date().toISOString(),
+      }
+    } else {
+      // Phase 2 path: single OpenCodeSessionDispatcher.
+      const worker = opts.workerImpl ?? pickWorker(opts.worker ?? "stub")
+      const dispatcher = new OpenCodeSessionDispatcher({
+        worker,
+        reviewer,
+        workspaceCwd: opts.workspace,
+        allowDirtyWorkspace: opts.allowDirtyWorkspace,
+        allowNonGitWorkspace: opts.allowNonGitWorkspace,
+        writeArtifact: artifactWriter(store),
+      })
+      dispatch = await dispatcher.dispatch(dispatchInput)
+    }
   } else {
     const dispatcher = new NoopDispatcher(artifactWriter(store))
     dispatch = await dispatcher.dispatch(dispatchInput)
@@ -220,8 +256,9 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
 
 function pickWorker(kind: WorkerKind): Worker {
   switch (kind) {
-    case "opencode": return new OpenCodeWorker()
-    case "stub":     return new StubWorker()
+    case "opencode":         return new OpenCodeWorker()
+    case "stub":             return new StubWorker()
+    case "multi-role-stub":  return new MultiRoleStubWorker()
   }
 }
 
@@ -258,3 +295,16 @@ export type { AgentContract, AgentResult, ContractReview, CriterionResult } from
 export { probeGit, captureDiff } from "./opencode/git-diff"
 export { ArtifactStore, resolveArtifactRoot, artifactWriter } from "./artifacts/store"
 export { renderFinalReport } from "./report/final-report"
+export { buildOrchestrationPlan } from "./orchestration/plan"
+export type { OrchestrationPlan, OrchestrationStep } from "./orchestration/plan"
+export { MultiAgentOrchestrator } from "./orchestration/orchestrator"
+export type {
+  MultiAgentOrchestratorOptions,
+  OrchestrationInput,
+  OrchestrationSummary,
+  RoleAttemptRecord,
+} from "./orchestration/orchestrator"
+export { MultiRoleStubWorker } from "./orchestration/role-worker"
+export { buildRoleContract } from "./orchestration/role-contract-builders"
+export type { AgentRole } from "./orchestration/roles"
+export { FILE_WRITING_ROLES } from "./orchestration/roles"

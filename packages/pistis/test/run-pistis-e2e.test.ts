@@ -220,6 +220,61 @@ describe("runPistis (end-to-end)", () => {
     }
   })
 
+  test("--apply --multi-agent runs the full Phase 3 orchestration", async () => {
+    const wsDir = await fs.mkdtemp(path.join(os.tmpdir(), "pistis-multi-ws-"))
+    const { spawn } = await import("node:child_process")
+    const sh = (cmd: string, args: string[], cwd: string) =>
+      new Promise<number>((res) => {
+        const c = spawn(cmd, args, { cwd, stdio: "ignore" })
+        c.on("close", (code) => res(code ?? -1))
+        c.on("error", () => res(-1))
+      })
+    await sh("git", ["init", "-q", "-b", "main"], wsDir)
+    await sh("git", ["config", "user.email", "p@p"], wsDir)
+    await sh("git", ["config", "user.name", "p"], wsDir)
+    await fs.mkdir(path.join(wsDir, "src"), { recursive: true })
+    await fs.writeFile(path.join(wsDir, "src/app.ts"), "// original\n")
+    await sh("git", ["add", "."], wsDir)
+    await sh("git", ["commit", "-q", "-m", "init"], wsDir)
+
+    const multiIncidentPath = path.join(outDir, "incident-multi.json")
+    await fs.writeFile(
+      multiIncidentPath,
+      JSON.stringify({
+        incidentId: "INC-MULTI-1",
+        issueType: "runtime_exception",
+        severity: "low",
+        primaryNodeId: "service:plain",
+        message: "x",
+        candidateFiles: ["src/app.ts"],
+      }),
+    )
+    try {
+      const result = await runPistis({
+        incidentPath: multiIncidentPath,
+        neatUrl: fake.url,
+        outDir: path.join(outDir, "runs-multi"),
+        apply: true,
+        workspace: wsDir,
+        worker: "multi-role-stub",
+        multiAgent: true,
+      })
+      expect(result.dispatched).toBe(true)
+      expect(result.dispatchReason).toContain("multi-agent")
+      expect(result.artifacts).toContain("orchestration-summary.json")
+      // top-level patch.diff exists
+      expect(result.artifacts).toContain("patch.diff")
+      const orchSummaryRaw = await fs.readFile(path.join(result.runDir, "orchestration-summary.json"), "utf8")
+      const orchSummary = JSON.parse(orchSummaryRaw)
+      expect(orchSummary.finalVerdict).toBe("accepted")
+      expect(Object.keys(orchSummary.roleResults)).toContain("graph_context")
+      expect(Object.keys(orchSummary.roleResults)).toContain("patch")
+      expect(Object.keys(orchSummary.roleResults)).toContain("reviewer")
+    } finally {
+      await fs.rm(wsDir, { recursive: true, force: true })
+    }
+  })
+
   test("dead NEAT (/health) surfaces a clear error", async () => {
     await expect(
       runPistis({

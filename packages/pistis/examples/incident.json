@@ -1,0 +1,32 @@
+{
+  "incidentId": "INC-2026-0001",
+  "issueType": "runtime_exception",
+  "severity": "high",
+  "primaryNodeId": "service:checkout-api",
+  "failingEdge": {
+    "id": "edge-42",
+    "from": "service:checkout-api",
+    "to": "service:billing-db",
+    "type": "CALLS"
+  },
+  "errorId": "err-9b3a",
+  "message": "TypeError: Cannot read properties of undefined (reading 'amount') at handlers/checkout.ts:128",
+  "evidence": [
+    {
+      "kind": "stack",
+      "file": "packages/checkout/src/handlers/checkout.ts",
+      "line": 128,
+      "stack": "TypeError: ...\n    at finalizeOrder (handlers/checkout.ts:128:14)\n    at submit (handlers/checkout.ts:71:9)",
+      "snippet": "const total = invoice.amount + fees"
+    }
+  ],
+  "candidateFiles": [
+    "packages/checkout/src/handlers/checkout.ts",
+    "packages/checkout/src/invoice.ts"
+  ],
+  "labels": ["http", "checkout"],
+  "metadata": {
+    "owningTeam": "payments",
+    "introducedBy": "deploy-2026-06-08T14:22Z"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode-ai/pistis",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "bun test --timeout 30000"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./cli": "./src/cli.ts",
+    "./incident/schema": "./src/incident/schema.ts",
+    "./neat/client": "./src/neat/client.ts",
+    "./neat/context-builder": "./src/neat/context-builder.ts",
+    "./planner/classifier": "./src/planner/classifier.ts",
+    "./planner/remediation-plan": "./src/planner/remediation-plan.ts",
+    "./opencode/dispatcher": "./src/opencode/dispatcher.ts",
+    "./validation/risk-gate": "./src/validation/risk-gate.ts",
+    "./validation/policy-gate": "./src/validation/policy-gate.ts",
+    "./validation/test-runner": "./src/validation/test-runner.ts",
+    "./artifacts/store": "./src/artifacts/store.ts",
+    "./report/final-report": "./src/report/final-report.ts",
+    "./pr/github-pr": "./src/pr/github-pr.ts"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@types/yargs": "17.0.33",
+    "@typescript/native-preview": "catalog:",
+    "typescript": "catalog:",
+    "yargs": "18.0.0"
+  }
+}

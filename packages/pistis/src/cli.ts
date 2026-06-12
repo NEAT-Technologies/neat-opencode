@@ -1,19 +1,18 @@
 import type { CommandModule } from "yargs"
 import { runPistis } from "./index"
+import type { WorkerKind } from "./index"
 
 /**
- * Yargs CommandModule for `opencode pistis run`. The opencode package wires
- * this in via its existing `cmd()` registration so we don't depend on the
- * runtime substrate (Effect, InstanceRef) — Phase 1 Pistis is a pure
- * read-only flow.
+ * `opencode pistis run` — the bridge command.
  *
- * The builder/handler are typed against `any` so the OpenCode CLI can
- * register this CommandModule without inheriting our flag types into its
- * own argv inference (matches how other opencode commands erase their args).
+ * Phase 1 (default): dry-run, deterministic scaffold.
+ * Phase 2 (--apply): runs one worker per AgentContract, captures patch.diff
+ *                    and test-report.txt, reviews against successCriteria,
+ *                    retries up to --max-retries with a refined prompt.
  */
 const RunSub: CommandModule<unknown, unknown> = {
   command: "run",
-  describe: "run Pistis remediation against a NEAT incident (Phase 1: deterministic dry-run scaffold)",
+  describe: "run Pistis remediation against a NEAT incident",
   builder: (yargs) =>
     yargs
       .option("incident", {
@@ -32,7 +31,7 @@ const RunSub: CommandModule<unknown, unknown> = {
       .option("test-command", {
         type: "string",
         array: true,
-        describe: "validation command (repeatable). Phase 1 records but does not execute.",
+        describe: "validation command (repeatable). Phase 2 sandbox-executes via /bin/sh -c.",
       })
       .option("out", {
         type: "string",
@@ -42,26 +41,52 @@ const RunSub: CommandModule<unknown, unknown> = {
       .option("dry-run", {
         type: "boolean",
         default: true,
-        describe: "Phase 1 default: true. No code changes, no agent execution.",
+        describe: "default true. --apply turns this off and runs the worker.",
       })
       .option("apply", {
         type: "boolean",
         default: false,
-        describe: "Phase 2+ : dispatch an OpenCode implementation session. Not supported in Phase 1.",
+        describe: "Phase 2: dispatch a worker (per AgentContract) and capture patch.diff + contract-review.json.",
       })
       .option("pr", {
         type: "boolean",
         default: false,
-        describe: "Phase 3+ : open a GitHub PR. Not supported in Phase 1.",
+        describe: "Phase 4: open a GitHub PR. Not supported yet.",
       })
       .option("approve-risk", {
         type: "string",
         array: true,
         describe: "explicitly approve a blocked risk gate by id (repeatable)",
+      })
+      .option("worker", {
+        type: "string",
+        choices: ["stub", "opencode"],
+        default: "stub",
+        describe: "Phase 2 worker. `stub`=deterministic test worker; `opencode`=real OpenCode session (stub pending SDK wiring).",
+      })
+      .option("workspace", {
+        type: "string",
+        describe: "Phase 2 host path the worker operates in. MUST be a clean git repo unless --allow-dirty-workspace/--allow-non-git-workspace.",
+      })
+      .option("max-retries", {
+        type: "number",
+        default: 2,
+        describe: "cap on contract retries (so 3 attempts total at default)",
+      })
+      .option("allow-dirty-workspace", {
+        type: "boolean",
+        default: false,
+        describe: "let the worker run even if --workspace has uncommitted changes",
+      })
+      .option("allow-non-git-workspace", {
+        type: "boolean",
+        default: false,
+        describe: "let the worker run on a non-git directory (diff capture degrades)",
       }),
   async handler(args) {
     const a = args as Record<string, unknown>
     try {
+      const worker = (typeof a.worker === "string" ? a.worker : "stub") as WorkerKind
       const result = await runPistis({
         incidentPath: String(a.incident),
         neatUrl: typeof a["neat-url"] === "string" ? (a["neat-url"] as string) : undefined,
@@ -72,6 +97,11 @@ const RunSub: CommandModule<unknown, unknown> = {
         apply: a.apply === true,
         pr: a.pr === true,
         approveRisk: Array.isArray(a["approve-risk"]) ? (a["approve-risk"] as string[]) : [],
+        worker,
+        workspace: typeof a.workspace === "string" ? (a.workspace as string) : undefined,
+        maxRetries: typeof a["max-retries"] === "number" ? (a["max-retries"] as number) : undefined,
+        allowDirtyWorkspace: a["allow-dirty-workspace"] === true,
+        allowNonGitWorkspace: a["allow-non-git-workspace"] === true,
       })
       process.stdout.write(formatSummary(result) + "\n")
     } catch (err) {
@@ -97,6 +127,7 @@ function formatSummary(r: Awaited<ReturnType<typeof runPistis>>): string {
     `risk: ${r.worstRiskStatus}`,
     `policy: ${r.policyStatus}`,
     `dispatched: ${r.dispatched ? "yes" : "no"}`,
+    r.dispatchReason ? `dispatch reason: ${r.dispatchReason}` : "",
     `run dir: ${r.runDir}`,
     `artifacts: ${r.artifacts.join(", ")}`,
     r.dryRun ? "no code was modified (dry run)." : "",

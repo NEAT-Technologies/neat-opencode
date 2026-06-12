@@ -3,11 +3,20 @@ import type { GraphContext } from "../neat/context-builder"
 import type { RemediationPlan } from "../planner/remediation-plan"
 import type { GateResult } from "../validation/risk-gate"
 import type { PolicyGateResult } from "../validation/policy-gate"
+import type { AgentContract } from "../contract/types"
+import { buildAgentContract } from "../contract/builder"
 
 /**
- * Phase 1 dispatcher contract. Phase 2 introduces OpenCodeSessionDispatcher
- * that actually starts an OpenCode session; the interface stays identical so
- * planner/context code doesn't change.
+ * Dispatcher contract.
+ *
+ * Implementations:
+ *   - NoopDispatcher              (Phase 1 default, --dry-run)
+ *   - OpenCodeSessionDispatcher   (Phase 2: runs one worker per AgentContract,
+ *                                  reviews against successCriteria, retries
+ *                                  with refined prompts)
+ *
+ * Interface stability is the point: planner/context code never changes
+ * between phases. The dispatcher swap is the only knob.
  */
 export interface RemediationDispatcher {
   readonly name: string
@@ -24,6 +33,8 @@ export interface RemediationDispatchInput {
   /** Outputs Pistis wants the implementation agent to produce. */
   requestedOutputs: RequestedOutputs
   dryRun: boolean
+  /** Risk gate results — used to seed forbiddenFiles in the first AgentContract. */
+  riskGates?: GateResult[]
 }
 
 export interface DispatchConstraints {
@@ -57,9 +68,10 @@ export interface RemediationDispatchResult {
 }
 
 /**
- * NoopDispatcher — Phase 1 default. Records the exact dispatch request as
- * dispatch-request.json so Phase 2 can replay it. Never edits files, never
- * starts an agent.
+ * NoopDispatcher — Phase 1 default. Writes `dispatch-request.json` shaped as
+ * the FIRST AgentContract (per the contract-driven prompt: "Phase 1's
+ * dispatch-request.json should represent the first version of an
+ * AgentContract"). Never edits files, never starts an agent.
  */
 export class NoopDispatcher implements RemediationDispatcher {
   readonly name = "noop"
@@ -68,43 +80,33 @@ export class NoopDispatcher implements RemediationDispatcher {
   ) {}
 
   async dispatch(input: RemediationDispatchInput): Promise<RemediationDispatchResult> {
-    const payload = {
+    const contract: AgentContract = buildAgentContract({
+      incident: input.incident,
+      graph: input.graphContext,
+      plan: input.plan,
+      classification: { class: input.plan.issueClass, reasons: [], confidence: "high" },
+      riskGates: input.riskGates ?? [],
+      testCommands: input.constraints.testCommands,
+    })
+
+    const envelope = {
       dispatcher: this.name,
       dispatchedAt: new Date().toISOString(),
       dryRun: input.dryRun,
-      incident: {
-        id: input.incident.incidentId,
-        issueType: input.incident.issueType,
-        severity: input.incident.severity,
-        primaryNodeId: input.incident.primaryNodeId,
-        failingEdgeId: input.incident.failingEdgeId,
-        errorId: input.incident.errorId,
-      },
-      neat: {
-        baseUrl: input.graphContext.neat.baseUrl,
-        project: input.graphContext.neat.project,
-      },
-      plan: {
-        issueClass: input.plan.issueClass,
-        strategy: input.plan.strategy.name,
-        agentTasks: input.plan.strategy.agentTasks,
-        nextAction: input.plan.nextAction,
-      },
-      candidateFiles: input.candidateFiles,
-      constraints: input.constraints,
       safetyRules: input.safetyRules,
       requestedOutputs: input.requestedOutputs,
+      contract,
       note:
-        "Phase 1 dispatcher is a no-op. This file records what Phase 2's OpenCodeSessionDispatcher would receive. No files were modified, no agent was started.",
+        "NoopDispatcher recorded the first AgentContract that would be sent to a worker. No sandbox was spawned, no worker was started, no files were modified.",
     }
-    const path = await this.writeArtifact("dispatch-request.json", JSON.stringify(payload, null, 2) + "\n")
+    const path = await this.writeArtifact("dispatch-request.json", JSON.stringify(envelope, null, 2) + "\n")
     return {
       dispatched: false,
       reason: input.dryRun
-        ? "dry-run: dispatcher is noop; request recorded as dispatch-request.json"
-        : "Phase 1: only noop dispatcher is implemented",
+        ? "dry-run: dispatcher is noop; first AgentContract recorded as dispatch-request.json"
+        : "noop dispatcher: no worker is wired",
       artifactPath: path,
-      dispatchedAt: payload.dispatchedAt,
+      dispatchedAt: envelope.dispatchedAt,
     }
   }
 }

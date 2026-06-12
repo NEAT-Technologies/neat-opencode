@@ -67,7 +67,15 @@ describe("NoopDispatcher", () => {
     expect(r.dispatched).toBe(false)
     expect(writes["dispatch-request.json"]).toContain("INC-1")
     expect(writes["dispatch-request.json"]).toContain('"dispatcher": "noop"')
-    expect(writes["dispatch-request.json"]).toContain("Phase 1 dispatcher is a no-op")
+    // Phase 2: dispatch-request.json carries the first AgentContract
+    const parsed = JSON.parse(writes["dispatch-request.json"] ?? "{}")
+    expect(parsed.contract).toBeDefined()
+    expect(parsed.contract.contractId).toMatch(/^INC-1::patch::000$/)
+    expect(parsed.contract.agentRole).toBe("patch")
+    expect(Array.isArray(parsed.contract.successCriteria)).toBe(true)
+    expect(parsed.contract.successCriteria.length).toBeGreaterThan(0)
+    expect(Array.isArray(parsed.contract.constraints)).toBe(true)
+    expect(parsed.contract.maxRetries).toBeGreaterThanOrEqual(0)
   })
 })
 

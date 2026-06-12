@@ -21,6 +21,8 @@ export interface PreflightInput {
   approvals?: string[]
   /** When true, an "unknown + high severity" gate is required-approval. */
   blockUnknownHighSeverity?: boolean
+  /** When true, --apply is in effect: writes inside --workspace are allowed (the dispatcher enforces the bound). */
+  applyMode?: boolean
 }
 
 const PATH_PATTERNS = {
@@ -120,11 +122,17 @@ export function runPreflightRiskGates(input: PreflightInput): GateResult[] {
     evidence: destructiveHits,
   })
 
-  // External-directory writes — always denied in Phase 1.
+  // External-directory writes — Phase 1 (dry-run) blocks anything outside the
+  // artifact dir. Phase 2 (--apply) allows writes inside --workspace, because
+  // the dispatcher enforces that bound via safeResolve + allowedFiles. The
+  // gate stays `pass` in apply-mode so the dispatcher can proceed; the actual
+  // bound is checked at write time, not preflight.
   results.push({
     gateId: "external_directory_writes",
-    status: "block",
-    reason: "Phase 1 forbids writes outside the artifact directory",
+    status: input.applyMode ? "pass" : "block",
+    reason: input.applyMode
+      ? "apply mode: writes are bounded to --workspace by the dispatcher (allowedFiles + safeResolve)"
+      : "Phase 1 forbids writes outside the artifact directory",
     evidence: [],
   })
 

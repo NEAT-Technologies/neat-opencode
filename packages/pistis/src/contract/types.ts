@@ -28,16 +28,6 @@ export interface AgentContract {
   requiredOutputs: string[]
   validationCommands: string[]
   maxRetries: number
-  /**
-   * Phase 3: structured inputs from upstream orchestration steps. `priorFindings`
-   * is a role→AgentResult map; the worker may reference earlier agents' summaries
-   * and risk notes but must not assume their diffs are still in the workspace
-   * (the orchestrator may reset between roles).
-   */
-  inputs?: {
-    priorFindings?: Record<string, AgentResult>
-    [key: string]: unknown
-  }
 }
 
 export interface AgentResult {

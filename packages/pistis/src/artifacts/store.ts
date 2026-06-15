@@ -36,18 +36,10 @@ export class ArtifactStore {
     return new ArtifactStore(runDir)
   }
 
-  /**
-   * Write a UTF-8 text artifact atomically. Returns absolute path.
-   *
-   * `name` may include slashes for nested artifacts (e.g. `graph_context/001/contract.json`).
-   * Parent directories are created on demand. The tmp file is created in the
-   * same directory as the target so the rename is atomic.
-   */
+  /** Write a UTF-8 text artifact atomically. Returns absolute path. */
   async writeText(name: string, content: string): Promise<string> {
     const target = path.join(this.runDir, name)
-    const parent = path.dirname(target)
-    await fs.mkdir(parent, { recursive: true })
-    const tmp = path.join(parent, `.${path.basename(name)}.${process.pid}.${Date.now()}.tmp`)
+    const tmp = path.join(this.runDir, `.${name}.${process.pid}.${Date.now()}.tmp`)
     const handle = await fs.open(tmp, "w", 0o644)
     try {
       await handle.writeFile(content, "utf8")

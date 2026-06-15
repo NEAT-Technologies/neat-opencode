@@ -1,23 +1,19 @@
 /**
  * Pistis public surface — the entry point OpenCode's CLI command calls into.
  *
- * Phase 1 is a deterministic dry-run scaffold:
- *   1. Load + normalize incident JSON.
- *   2. Fetch graph context from NEAT (read-only).
- *   3. Classify deterministically.
- *   4. Build a remediation plan.
- *   5. Run risk + policy preflight gates.
- *   6. Dispatch via NoopDispatcher (records intended dispatch).
- *   7. Write final report.
+ * Phase 1 (dry-run): plan + gate + NoopDispatcher writes the first AgentContract.
+ * Phase 2 (--apply): plan + gate + OpenCodeSessionDispatcher runs ONE worker,
+ *                    reviews against successCriteria, retries with refined prompt.
  *
- * Phase 1 NEVER:
- *   - edits files outside the artifact directory,
- *   - runs arbitrary shell commands,
- *   - creates branches/commits/PRs,
- *   - calls a real OpenCode session.
+ * Pistis NEVER:
+ *   - auto-merges
+ *   - deploys to production
+ *   - calls --pr (that's Phase 4)
+ *   - modifies files outside `--workspace` and the artifact dir
+ *   - runs shell commands the user didn't explicitly list in --test-command
  */
 
-import { loadIncidentFile, normalizeIncident } from "./incident/schema"
+import { loadIncidentFile } from "./incident/schema"
 import {
   NeatClient,
   resolveNeatBaseUrl,
@@ -31,8 +27,16 @@ import { runPreflightRiskGates, renderRiskGatesMarkdown, worstStatus } from "./v
 import { runPolicyGate } from "./validation/policy-gate"
 import { planTestRuns } from "./validation/test-runner"
 import { NoopDispatcher, buildSafetyRules } from "./opencode/dispatcher"
+import { OpenCodeSessionDispatcher } from "./opencode/opencode-session-dispatcher"
+import { StubWorker } from "./opencode/stub-worker"
+import { OpenCodeWorker } from "./opencode/opencode-worker"
+import type { Worker } from "./opencode/worker"
+import { RuleBasedContractReviewer } from "./contract/reviewer"
+import type { ContractReviewer } from "./contract/reviewer"
 import { ArtifactStore, resolveArtifactRoot, artifactWriter } from "./artifacts/store"
 import { renderFinalReport } from "./report/final-report"
+
+export type WorkerKind = "stub" | "opencode"
 
 export interface RunPistisOptions {
   incidentPath: string
@@ -44,8 +48,20 @@ export interface RunPistisOptions {
   apply?: boolean
   pr?: boolean
   approveRisk?: string[]
-  /** For tests: replace fetch + return artifacts even on error. */
+  /** Phase 2 worker selector. Default: "stub". */
+  worker?: WorkerKind
+  /** Phase 2 workspace where the worker operates. Required for --apply. */
+  workspace?: string
+  /** Phase 2: skip the clean-working-tree precheck (developer convenience). */
+  allowDirtyWorkspace?: boolean
+  /** Phase 2: skip the git-repo precheck (StubWorker on plain dirs). */
+  allowNonGitWorkspace?: boolean
+  /** Phase 2: cap contract retries. Default 2 (so 3 attempts total). */
+  maxRetries?: number
+  /** For tests. */
   fetchImpl?: typeof fetch
+  workerImpl?: Worker
+  reviewerImpl?: ContractReviewer
 }
 
 export interface RunPistisResult {
@@ -57,22 +73,18 @@ export interface RunPistisResult {
   policyStatus: string
   dispatched: boolean
   dryRun: boolean
+  /** Phase 2: dispatcher's reason / verdict. */
+  dispatchReason?: string
 }
 
 export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult> {
-  // Phase 1 hard rules.
-  if (opts.apply) {
-    throw new Error("--apply is not supported in Phase 1; runs are always dry-run")
-  }
   if (opts.pr) {
-    throw new Error("--pr is a Phase 3 feature and is not supported in Phase 1")
+    throw new Error("--pr is a Phase 4 feature and is not supported yet")
   }
-  const dryRun = opts.dryRun !== false // default true in Phase 1
+  const apply = opts.apply === true
+  const dryRun = apply ? false : opts.dryRun !== false
 
-  // 1. Load incident.
   const incident = await loadIncidentFile(opts.incidentPath)
-
-  // 2. Resolve NEAT client + artifact store.
   const baseUrl = resolveNeatBaseUrl(opts.neatUrl)
   const authToken = resolveNeatAuthToken()
   const client = new NeatClient({
@@ -83,8 +95,6 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
   })
   const store = await ArtifactStore.create(resolveArtifactRoot(opts.outDir), incident.incidentId)
 
-  // 3. Persist the normalized incident immediately so even a fatal NEAT failure
-  //    leaves a useful trace.
   await store.writeJson("incident.json", {
     normalized: incident,
     pistis: {
@@ -96,43 +106,45 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
         testCommands: opts.testCommands ?? [],
         outDir: opts.outDir,
         dryRun,
+        apply,
         approveRisk: opts.approveRisk ?? [],
+        worker: opts.worker ?? "stub",
+        workspace: opts.workspace,
+        maxRetries: opts.maxRetries,
       },
     },
   })
 
-  // 4. Build graph context (throws on /health or primary node failure).
   const graph = await buildGraphContext(client, incident)
   await store.writeJson("graph-context.json", graph)
 
-  // 5. Classify + plan.
   const classification = classifyIncident(incident, graph)
   const plan = buildPlan(incident, graph, classification, {
     testCommands: opts.testCommands ?? [],
   })
 
-  // 6. Risk + policy gates.
   const riskGates = runPreflightRiskGates({
     incident,
     graph,
     classification,
     approvals: opts.approveRisk,
+    applyMode: apply,
   })
   const policy = await runPolicyGate(client, graph)
   const validation = {
     riskGates,
     riskWorstStatus: worstStatus(riskGates),
     policy,
-    plannedTestRuns: planTestRuns(opts.testCommands ?? []),
+    plannedTestRuns: planTestRuns(opts.testCommands ?? [], apply ? "executed by dispatcher" : "phase 1 dry run"),
   }
   await store.writeJson("validation.json", validation)
-
-  // 7. Plan artifact.
   await store.writeText("plan.md", renderPlanMarkdown(incident, graph, plan, renderRiskGatesMarkdown(riskGates)))
 
-  // 8. Dispatch (Phase 1: NoopDispatcher writes dispatch-request.json).
-  const dispatcher = new NoopDispatcher(artifactWriter(store))
-  const dispatch = await dispatcher.dispatch({
+  const hasBlockingGate =
+    riskGates.some((g) => g.status === "block" || g.status === "requires_approval") ||
+    policy.status === "block"
+
+  const dispatchInput = {
     incident,
     graphContext: graph,
     plan,
@@ -145,13 +157,37 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
     safetyRules: buildSafetyRules(riskGates, policy),
     requestedOutputs: {
       patchDiff: true,
-      agentEventsJsonl: true,
+      agentEventsJsonl: false,
       sessionTranscript: false,
     },
     dryRun,
-  })
+    riskGates,
+  }
 
-  // 9. Final report.
+  let dispatch
+  if (apply && !hasBlockingGate) {
+    if (!opts.workspace) {
+      throw new Error("pistis: --apply requires --workspace pointing at a (clean) git repo")
+    }
+    const worker = opts.workerImpl ?? pickWorker(opts.worker ?? "stub")
+    const reviewer = opts.reviewerImpl ?? new RuleBasedContractReviewer()
+    const dispatcher = new OpenCodeSessionDispatcher({
+      worker,
+      reviewer,
+      workspaceCwd: opts.workspace,
+      allowDirtyWorkspace: opts.allowDirtyWorkspace,
+      allowNonGitWorkspace: opts.allowNonGitWorkspace,
+      writeArtifact: artifactWriter(store),
+    })
+    dispatch = await dispatcher.dispatch(dispatchInput)
+  } else {
+    const dispatcher = new NoopDispatcher(artifactWriter(store))
+    dispatch = await dispatcher.dispatch(dispatchInput)
+    if (apply && hasBlockingGate) {
+      dispatch = { ...dispatch, reason: "blocked by preflight gate — dispatching as noop instead of worker" }
+    }
+  }
+
   const artifacts = await store.list()
   const report = renderFinalReport({
     incident,
@@ -164,7 +200,7 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
     artifactsWritten: artifacts,
     runDir: store.runDir,
     dryRun,
-    phase: 1,
+    phase: apply ? 2 : 1,
   })
   await store.writeText("final-report.md", report)
 
@@ -178,11 +214,18 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
     policyStatus: policy.status,
     dispatched: dispatch.dispatched,
     dryRun,
+    dispatchReason: dispatch.reason,
   }
 }
 
-// Re-export key types so consumers (OpenCode CLI, future Phase 2 callers) can
-// stay loosely coupled to internal modules.
+function pickWorker(kind: WorkerKind): Worker {
+  switch (kind) {
+    case "opencode": return new OpenCodeWorker()
+    case "stub":     return new StubWorker()
+  }
+}
+
+// Re-exports: keep consumers loosely coupled.
 export { normalizeIncident, loadIncidentFile } from "./incident/schema"
 export type { NormalizedIncident } from "./incident/schema"
 export { NeatClient, resolveNeatBaseUrl, resolveNeatAuthToken } from "./neat/client"
@@ -195,11 +238,23 @@ export { runPreflightRiskGates, renderRiskGatesMarkdown, worstStatus } from "./v
 export type { GateResult, GateStatus } from "./validation/risk-gate"
 export { runPolicyGate } from "./validation/policy-gate"
 export type { PolicyGateResult, PolicyGateStatus } from "./validation/policy-gate"
-export { NoopDispatcher } from "./opencode/dispatcher"
+export { runTestCommands, planTestRuns, renderTestReport } from "./validation/test-runner"
+export type { TestRunResult } from "./validation/test-runner"
+export { NoopDispatcher, buildSafetyRules } from "./opencode/dispatcher"
 export type {
   RemediationDispatcher,
   RemediationDispatchInput,
   RemediationDispatchResult,
 } from "./opencode/dispatcher"
+export { OpenCodeSessionDispatcher } from "./opencode/opencode-session-dispatcher"
+export { StubWorker } from "./opencode/stub-worker"
+export { OpenCodeWorker } from "./opencode/opencode-worker"
+export type { Worker, WorkerWorkspace } from "./opencode/worker"
+export { WorkerNotImplementedError } from "./opencode/worker"
+export { RuleBasedContractReviewer } from "./contract/reviewer"
+export type { ContractReviewer, ContractReviewerInput } from "./contract/reviewer"
+export { buildAgentContract } from "./contract/builder"
+export type { AgentContract, AgentResult, ContractReview, CriterionResult } from "./contract/types"
+export { probeGit, captureDiff } from "./opencode/git-diff"
 export { ArtifactStore, resolveArtifactRoot, artifactWriter } from "./artifacts/store"
 export { renderFinalReport } from "./report/final-report"

@@ -2,7 +2,8 @@ import { spawn } from "node:child_process"
 import { promises as fs } from "node:fs"
 import { isAbsolute, resolve as resolvePath } from "node:path"
 import type { Worker } from "../opencode/worker"
-import type { ContractReviewer } from "../contract/reviewer"
+import type { ContractReviewer, ContractReviewerInput } from "../contract/reviewer"
+import type { AsyncContractReviewer } from "../contract/async-reviewer"
 import type { AgentContract, AgentResult, ContractReview } from "../contract/types"
 import type { NormalizedIncident } from "../incident/schema"
 import type { GraphContext } from "../neat/context-builder"
@@ -40,6 +41,13 @@ import { runTestCommands, renderTestReport } from "../validation/test-runner"
 export interface MultiAgentOrchestratorOptions {
   worker: Worker
   reviewer: ContractReviewer
+  /**
+   * Optional async reviewer (e.g. KimiReviewer) used for file-writing roles
+   * (patch, migration) when supplied. Reasoning roles (graph_context,
+   * root_cause, security_risk) always go through the sync reviewer because
+   * KimiReviewer pre-flights on AgentResult.diff being present.
+   */
+  asyncReviewer?: AsyncContractReviewer
   workspaceCwd: string
   allowDirtyWorkspace?: boolean
   allowNonGitWorkspace?: boolean
@@ -207,13 +215,16 @@ export class MultiAgentOrchestrator {
       )
       artifacts.agentResult = resultPath
 
-      const review = this.opts.reviewer.review({
-        contract: currentContract,
-        result,
-        testRuns,
-        observedFilesChanged,
-        attempt,
-      })
+      const review = await this.getReview(
+        {
+          contract: currentContract,
+          result,
+          testRuns,
+          observedFilesChanged,
+          attempt,
+        },
+        input,
+      )
       const reviewPath = await this.opts.writeArtifact(
         `${artifactPrefix}/contract-review.json`,
         JSON.stringify(review, null, 2) + "\n",
@@ -250,6 +261,29 @@ export class MultiAgentOrchestrator {
       }
     }
     return records
+  }
+
+  /**
+   * Route the review for one role-attempt to either the sync rule-based
+   * reviewer or the optional async reviewer (e.g. Kimi). The async path
+   * is only taken for file-writing roles because the async reviewer
+   * (KimiReviewer) requires AgentResult.diff to be populated.
+   */
+  private async getReview(
+    base: ContractReviewerInput,
+    input: OrchestrationInput,
+  ): Promise<ContractReview> {
+    const role = base.contract.agentRole
+    const isFileWriting = FILE_WRITING_ROLES.has(role as never)
+    if (this.opts.asyncReviewer && isFileWriting) {
+      return this.opts.asyncReviewer.review({
+        ...base,
+        incident: input.incident,
+        graphContext: input.graph,
+        primaryNodeId: input.incident.primaryNodeId,
+      })
+    }
+    return this.opts.reviewer.review(base)
   }
 }
 

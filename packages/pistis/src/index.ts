@@ -36,6 +36,11 @@ import { buildOrchestrationPlan } from "./orchestration/plan"
 import type { Worker } from "./opencode/worker"
 import { RuleBasedContractReviewer } from "./contract/reviewer"
 import type { ContractReviewer } from "./contract/reviewer"
+import type { AsyncContractReviewer } from "./contract/async-reviewer"
+import { FlashWorker } from "./workers/flash-worker"
+import { MinimaxWorker } from "./workers/minimax-worker"
+import { RouterWorker } from "./workers/router-worker"
+import { KimiReviewer } from "./reviewers/kimi-reviewer"
 import { ArtifactStore, resolveArtifactRoot, artifactWriter } from "./artifacts/store"
 import { renderFinalReport } from "./report/final-report"
 
@@ -63,10 +68,17 @@ export interface RunPistisOptions {
   maxRetries?: number
   /** Phase 3: switch to multi-agent orchestration (multiple roles per incident). */
   multiAgent?: boolean
+  /** Phase 4D: compose FlashWorker + MinimaxWorker via RouterWorker. */
+  useRouter?: boolean
+  /** Phase 4D: use KimiReviewer (Moonshot K2.7) for file-writing role review. */
+  useKimiReviewer?: boolean
+  /** Phase 4D: override KimiReviewer iteration cap. */
+  maxToolCalls?: number
   /** For tests. */
   fetchImpl?: typeof fetch
   workerImpl?: Worker
   reviewerImpl?: ContractReviewer
+  asyncReviewerImpl?: AsyncContractReviewer
 }
 
 export interface RunPistisResult {
@@ -178,11 +190,13 @@ export async function runPistis(opts: RunPistisOptions): Promise<RunPistisResult
     const reviewer = opts.reviewerImpl ?? new RuleBasedContractReviewer()
     if (opts.multiAgent === true) {
       // Phase 3 path: multi-agent orchestrator.
-      const worker = opts.workerImpl ?? pickWorker(opts.worker ?? "multi-role-stub")
+      const worker = opts.workerImpl ?? buildRealOrStubWorker(opts)
+      const asyncReviewer = opts.asyncReviewerImpl ?? buildKimiReviewerIfRequested(opts, client, store)
       const orchPlan = buildOrchestrationPlan(classification)
       const orchestrator = new MultiAgentOrchestrator({
         worker,
         reviewer,
+        asyncReviewer,
         workspaceCwd: opts.workspace,
         allowDirtyWorkspace: opts.allowDirtyWorkspace,
         allowNonGitWorkspace: opts.allowNonGitWorkspace,
@@ -262,6 +276,57 @@ function pickWorker(kind: WorkerKind): Worker {
   }
 }
 
+/**
+ * Phase 4D: build the RouterWorker if --use-router was set; otherwise fall
+ * back to the configured stub worker. FlashWorker / MinimaxWorker constructors
+ * throw clearly on missing API keys, so missing-env errors surface here with
+ * a clean message rather than later in a confusing place.
+ */
+function buildRealOrStubWorker(opts: RunPistisOptions): Worker {
+  if (opts.useRouter !== true) {
+    return pickWorker(opts.worker ?? "multi-role-stub")
+  }
+  const flashWorker = new FlashWorker()
+  const minimaxWorker = new MinimaxWorker()
+  return new RouterWorker({ flashWorker, minimaxWorker })
+}
+
+/**
+ * Phase 4D: build a KimiReviewer when --use-kimi-reviewer was set. Returns
+ * undefined when the flag is not set; the orchestrator falls back to the
+ * sync rule-based reviewer in that case.
+ *
+ * Tool-call audit log is wired into `tool-calls.jsonl` under the run dir
+ * via ArtifactStore.
+ */
+function buildKimiReviewerIfRequested(
+  opts: RunPistisOptions,
+  client: NeatClient,
+  store: ArtifactStore,
+): AsyncContractReviewer | undefined {
+  if (opts.useKimiReviewer !== true) return undefined
+  const append = makeToolCallLogAppender(store)
+  return new KimiReviewer({
+    neatClient: client,
+    appendToolCallLog: append,
+    maxToolCalls: opts.maxToolCalls,
+  })
+}
+
+/**
+ * Returns a closure that appends one line at a time to tool-calls.jsonl
+ * under the run dir. The lines are accumulated in memory and re-written
+ * each call — fine for the per-incident scale (max ~8 calls) and avoids
+ * needing a streaming file handle through ArtifactStore.
+ */
+function makeToolCallLogAppender(store: ArtifactStore): (line: string) => Promise<void> {
+  let accumulated = ""
+  return async (line: string) => {
+    accumulated += line
+    await store.writeText("tool-calls.jsonl", accumulated)
+  }
+}
+
 // Re-exports: keep consumers loosely coupled.
 export { normalizeIncident, loadIncidentFile } from "./incident/schema"
 export type { NormalizedIncident } from "./incident/schema"
@@ -295,6 +360,9 @@ export type { AgentContract, AgentResult, ContractReview, CriterionResult } from
 export { probeGit, captureDiff } from "./opencode/git-diff"
 export { ArtifactStore, resolveArtifactRoot, artifactWriter } from "./artifacts/store"
 export { renderFinalReport } from "./report/final-report"
+export { RouterWorker } from "./workers/router-worker"
+export { SyncToAsyncReviewerAdapter } from "./contract/async-reviewer"
+export type { AsyncContractReviewer, AsyncContractReviewerInput } from "./contract/async-reviewer"
 export { buildOrchestrationPlan } from "./orchestration/plan"
 export type { OrchestrationPlan, OrchestrationStep } from "./orchestration/plan"
 export { MultiAgentOrchestrator } from "./orchestration/orchestrator"

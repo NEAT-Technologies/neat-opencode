@@ -87,6 +87,20 @@ const RunSub: CommandModule<unknown, unknown> = {
         type: "boolean",
         default: false,
         describe: "let the worker run on a non-git directory (diff capture degrades)",
+      })
+      .option("use-router", {
+        type: "boolean",
+        default: false,
+        describe: "Phase 4D: use the real model stack — FlashWorker (reasoning) + MinimaxWorker (patch/migration), composed via RouterWorker. Requires GEMINI_API_KEY and MINIMAX_API_KEY in the environment.",
+      })
+      .option("use-kimi-reviewer", {
+        type: "boolean",
+        default: false,
+        describe: "Phase 4D: use KimiReviewer (Moonshot K2.7) with the 8 read-only NEAT tools for file-writing role review. Requires MOONSHOT_API_KEY.",
+      })
+      .option("max-tool-calls", {
+        type: "number",
+        describe: "Phase 4D: override KimiReviewer iteration cap (default 8, clamped to [1, 16]). Also respects PISTIS_KIMI_TOOL_BUDGET.",
       }),
   async handler(args) {
     const a = args as Record<string, unknown>
@@ -108,6 +122,9 @@ const RunSub: CommandModule<unknown, unknown> = {
         allowDirtyWorkspace: a["allow-dirty-workspace"] === true,
         allowNonGitWorkspace: a["allow-non-git-workspace"] === true,
         multiAgent: a["multi-agent"] === true,
+        useRouter: a["use-router"] === true,
+        useKimiReviewer: a["use-kimi-reviewer"] === true,
+        maxToolCalls: typeof a["max-tool-calls"] === "number" ? (a["max-tool-calls"] as number) : undefined,
       })
       process.stdout.write(formatSummary(result) + "\n")
     } catch (err) {

@@ -2,6 +2,8 @@ export { FlashWorker } from "./flash-worker"
 export type { FlashWorkerOptions } from "./flash-worker"
 export { MinimaxWorker } from "./minimax-worker"
 export type { MinimaxWorkerOptions } from "./minimax-worker"
+export { RouterWorker } from "./router-worker"
+export type { RouterWorkerOptions } from "./router-worker"
 export { OutOfRoleError } from "./errors"
 export {
   GRAPH_CONTEXT_SYSTEM_PROMPT,

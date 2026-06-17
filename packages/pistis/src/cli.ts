@@ -1,6 +1,7 @@
 import type { CommandModule } from "yargs"
 import { runPistis } from "./index"
 import type { WorkerKind } from "./index"
+import { PistisDaemon } from "./daemon"
 
 /**
  * `opencode pistis run` — the bridge command.
@@ -134,10 +135,93 @@ const RunSub: CommandModule<unknown, unknown> = {
   },
 }
 
+const DaemonSub: CommandModule<unknown, unknown> = {
+  command: "daemon",
+  describe: "Phase 5A: run Pistis as a long-lived HTTP server (NEAT-callable)",
+  builder: (yargs) =>
+    yargs
+      .option("port", {
+        type: "number",
+        default: 7777,
+        describe: "TCP port to bind to (default 7777)",
+      })
+      .option("hostname", {
+        type: "string",
+        default: "127.0.0.1",
+        describe: "bind hostname (default 127.0.0.1 — do NOT expose to the public internet)",
+      })
+      .option("webhook-url", {
+        type: "string",
+        describe: "POST result.json to this URL on every run completion. Requires PISTIS_WEBHOOK_SECRET in env.",
+      })
+      .option("cors-origin", {
+        type: "string",
+        describe: "enable CORS for this exact origin (e.g. https://neat.local). Omit for server-to-server use.",
+      })
+      .option("use-router", {
+        type: "boolean",
+        default: false,
+        describe: "use Flash+MiniMax via RouterWorker for every run (Phase 4D defaults).",
+      })
+      .option("use-kimi-reviewer", {
+        type: "boolean",
+        default: false,
+        describe: "use KimiReviewer for every run (Phase 4D defaults).",
+      })
+      .option("max-retries", {
+        type: "number",
+        default: 2,
+      }),
+  async handler(args) {
+    const a = args as Record<string, unknown>
+    const token = process.env.PISTIS_TOKEN ?? ""
+    if (token.length === 0) {
+      process.stderr.write("pistis: PISTIS_TOKEN env var is required to start the daemon\n")
+      process.exitCode = 1
+      return
+    }
+    const webhookUrl = typeof a["webhook-url"] === "string" ? (a["webhook-url"] as string) : undefined
+    let webhook
+    if (webhookUrl && webhookUrl.length > 0) {
+      const secret = process.env.PISTIS_WEBHOOK_SECRET ?? ""
+      if (secret.length === 0) {
+        process.stderr.write("pistis: --webhook-url requires PISTIS_WEBHOOK_SECRET env var\n")
+        process.exitCode = 1
+        return
+      }
+      webhook = { url: webhookUrl, secret }
+    }
+    const daemon = new PistisDaemon({
+      port: typeof a.port === "number" ? (a.port as number) : 7777,
+      hostname: typeof a.hostname === "string" ? (a.hostname as string) : "127.0.0.1",
+      token,
+      webhook,
+      corsOrigin: typeof a["cors-origin"] === "string" ? (a["cors-origin"] as string) : undefined,
+      defaultConfig: {
+        multiAgent: true,
+        apply: true,
+        useRouter: a["use-router"] === true,
+        useKimiReviewer: a["use-kimi-reviewer"] === true,
+        maxRetries: typeof a["max-retries"] === "number" ? (a["max-retries"] as number) : 2,
+      },
+    })
+    const info = daemon.start()
+    process.stdout.write(`pistis daemon listening on ${info.url}\n`)
+
+    const shutdown = async () => {
+      process.stdout.write("\npistis daemon: shutting down gracefully...\n")
+      await daemon.stop()
+      process.exit(0)
+    }
+    process.on("SIGINT", shutdown)
+    process.on("SIGTERM", shutdown)
+  },
+}
+
 export const PistisCommand: CommandModule<unknown, unknown> = {
   command: "pistis",
   describe: "AI remediation execution layer (NEAT bridge)",
-  builder: (yargs) => yargs.command(RunSub).demandCommand(),
+  builder: (yargs) => yargs.command(RunSub).command(DaemonSub).demandCommand(),
   async handler() {
     // root pistis command shows help via demandCommand()
   },

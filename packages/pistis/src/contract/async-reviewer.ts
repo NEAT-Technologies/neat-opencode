@@ -1,5 +1,5 @@
 import type { ContractReview } from "./types"
-import type { ContractReviewerInput } from "./reviewer"
+import type { ContractReviewer, ContractReviewerInput } from "./reviewer"
 import type { GraphContext } from "../neat/context-builder"
 import type { NormalizedIncident } from "../incident/schema"
 
@@ -24,4 +24,23 @@ export interface AsyncContractReviewerInput extends ContractReviewerInput {
 export interface AsyncContractReviewer {
   readonly name: string
   review(input: AsyncContractReviewerInput): Promise<ContractReview>
+}
+
+/**
+ * Adapter that lifts a sync ContractReviewer into the AsyncContractReviewer
+ * shape. Lets the orchestrator's internal review path stay uniformly async
+ * regardless of which reviewer the caller wired in.
+ *
+ * The async input is a superset of the sync input, so the adapter just
+ * forwards the base fields and drops the extras (incident / graphContext /
+ * primaryNodeId) that the sync reviewer doesn't use.
+ */
+export class SyncToAsyncReviewerAdapter implements AsyncContractReviewer {
+  readonly name: string
+  constructor(private readonly inner: ContractReviewer) {
+    this.name = `async(${inner.name})`
+  }
+  async review(input: AsyncContractReviewerInput): Promise<ContractReview> {
+    return this.inner.review(input)
+  }
 }

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pistis.opencode.dev/schemas/incident.schema.json",
+  "title": "Pistis Incident",
+  "description": "The incident JSON shape Pistis consumes. Producers (NEAT) MUST emit conforming JSON; consumers MAY accept additional unrecognised fields. This schema is the authoritative contract — keep it in sync with NormalizedIncident in src/incident/schema.ts.",
+  "type": "object",
+  "properties": {
+    "incidentId": {
+      "description": "Stable identifier. NEAT can use either `id` or `incidentId`; Pistis normalises to `incidentId`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "id": {
+      "description": "Alias for incidentId; either may be present.",
+      "type": "string",
+      "minLength": 1
+    },
+    "issueType": {
+      "description": "Free-form category. Pistis classifies internally; this is just the producer's view. Common values: runtime_exception, db_schema_or_query, policy_violation, deployment_regression.",
+      "type": "string"
+    },
+    "severity": {
+      "description": "One of info|low|medium|high|critical. Other strings (warn, error, sev1, p0, p1, fatal) are accepted and coerced.",
+      "type": "string"
+    },
+    "primaryNodeId": {
+      "description": "NEAT node id of the affected service (e.g. service:order-api). Required.",
+      "type": "string",
+      "minLength": 1
+    },
+    "failingEdgeId": {
+      "type": "string"
+    },
+    "failingEdge": {
+      "type": "object",
+      "properties": {
+        "id":   { "type": "string" },
+        "from": { "type": "string" },
+        "to":   { "type": "string" },
+        "type": { "type": "string" }
+      }
+    },
+    "errorId": {
+      "type": "string"
+    },
+    "message": {
+      "description": "Human-readable summary of the issue. Often the exception message or short title.",
+      "type": "string"
+    },
+    "evidence": {
+      "description": "Optional list of evidence items (stack traces, snippets, log excerpts, etc.). May also be a single object; Pistis normalises to array.",
+      "oneOf": [
+        { "type": "array", "items": { "$ref": "#/$defs/Evidence" } },
+        { "$ref": "#/$defs/Evidence" }
+      ]
+    },
+    "candidateFiles": {
+      "description": "Files Pistis should consider editing (a hint, not a hard scope — the contract builder narrows this further).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "project": {
+      "description": "NEAT project id for project-scoped routing. Optional.",
+      "type": "string"
+    },
+    "labels": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "anyOf": [
+    { "required": ["incidentId", "primaryNodeId"] },
+    { "required": ["id", "primaryNodeId"] }
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "kind":      { "type": "string" },
+        "message":   { "type": "string" },
+        "file":      { "type": "string" },
+        "line":      { "type": "integer" },
+        "column":    { "type": "integer" },
+        "stack":     { "type": "string" },
+        "snippet":   { "type": "string" },
+        "timestamp": { "type": "string" },
+        "source":    { "type": "string" },
+        "details":   { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    }
+  }
+}
